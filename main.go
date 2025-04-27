@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"meoe.io/daemonset-name-webhook/internal/appconfig"
+
+	slogctx "github.com/veqryn/slog-context"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,44 +59,51 @@ func extractNodeName(pod *corev1.Pod) string {
 	return ""
 }
 
-func mutatePod(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("got request")
+func mutatePod(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	logger := slogctx.FromCtx(ctx)
 
 	var admissionReview admissionv1.AdmissionReview
 	if err := json.NewDecoder(r.Body).Decode(&admissionReview); err != nil {
+		logger.Error("error decoding request", "error", err.Error())
 		http.Error(w, fmt.Sprintf("error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 	if admissionReview.Request.Resource != podResource {
+		logger.Error("unexpected resource type", "type", admissionReview.Request.Resource)
 		http.Error(w, "unexpected resource type", http.StatusBadRequest)
 		return
 	}
 
 	pod := corev1.Pod{}
-	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &pod); err != nil {
+	err := json.Unmarshal(admissionReview.Request.Object.Raw, &pod)
+	if err != nil {
+		logger.Error("error unmarshaling pod", "error", err.Error())
 		http.Error(w, fmt.Sprintf("error unmarshaling pod: %v", err), http.StatusBadRequest)
 		return
 	}
 
+	logger = logger.With("namespace", pod.Namespace, "pod", pod.Name, "GenerateName", pod.GenerateName)
+
 	if pod.GenerateName == "" {
-		fmt.Println("GenerateName is empty", pod.GenerateName, pod.Name, pod.Namespace)
+		logger.Error("GenerateName is empty")
 		http.Error(w, "GenerateName is empty", http.StatusBadRequest)
 		return
 	}
 	nodeName := extractNodeName(&pod)
 	if nodeName == "" {
-		fmt.Println("node not assigned", pod.GenerateName, pod.Name, pod.Namespace)
+		logger.Error("node not assigned")
 		http.Error(w, "node not assigned", http.StatusBadRequest)
 		return
 	}
 
-	// Sanitize node name for use in pod name (DNS-1123 subdomain)
 	sanitizedNodeName := strings.ReplaceAll(nodeName, "_", "-")
 	newPodName := pod.GenerateName + sanitizedNodeName
+	logger = logger.With("new-name", newPodName)
 
 	if errs := validation.IsDNS1123Subdomain(newPodName); len(errs) > 0 {
+		logger.Error("invalid pod name", "errors", errs)
 		http.Error(w, fmt.Sprintf("invalid pod name: %v", errs), http.StatusBadRequest)
 		return
 	}
@@ -104,49 +116,69 @@ func mutatePod(w http.ResponseWriter, r *http.Request) {
 			"value": newPodName,
 		},
 	}
-	fmt.Println("patching", patch)
+	logger.Debug("patched", "patch", patch)
 
-	patchBytes, _ := json.Marshal(patch)
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		logger.Error("could not marshal patch", "error", err.Error())
+	}
 
+	patchType := admissionv1.PatchTypeJSONPatch
 	admissionReview.Response = &admissionv1.AdmissionResponse{
 		UID:     admissionReview.Request.UID,
 		Allowed: true,
 		Patch:   patchBytes,
-		PatchType: func() *admissionv1.PatchType {
-			pt := admissionv1.PatchTypeJSONPatch
-			return &pt
-		}(),
+		PatchType: &patchType,
 	}
 
-	json.NewEncoder(w).Encode(admissionReview)
+	err = json.NewEncoder(w).Encode(admissionReview)
+	if err != nil {
+		logger.Error("could not send http response", "error", err.Error())
+	}
 }
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	appConfig := appconfig.ParseConfig()
+
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(slog.LevelInfo)
+	logHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	})
+	logger := slog.New(logHandler)
+
+	logger = logger.With("host", appConfig.Hostname)
+	ctx = slogctx.NewCtx(ctx, logger)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mutate-pod", mutatePod)
+	mux.HandleFunc("/mutate-pod", func(w http.ResponseWriter, r *http.Request) {
+		mutatePod(ctx, w, r)
+	})
 	server := &http.Server{
-		Addr:    ":8443",
+		Addr:    appConfig.ListenAddress,
 		Handler: mux,
 	}
 
 	go func() {
 		err := server.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key")
 		if !errors.Is(err, http.ErrServerClosed) {
-			fmt.Println("HTTP server error", err)
+			logger.Error("HTTP server error", "error", err.Error())
 		}
-		fmt.Println("Stopped serving new connections.")
+		logger.Info("Stopped serving new connections")
 	}()
 
 	<-ctx.Done()
+	logger.Info("caught context cancel")
 
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownRelease()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		fmt.Println("HTTP shutdown error", err)
+	err := server.Shutdown(shutdownCtx)
+	if err != nil {
+		logger.Error("HTTP shutdown error", "error", err.Error())
 	}
-	fmt.Println("Graceful shutdown complete.")
+	logger.Info("Graceful shutdown complete")
 }
