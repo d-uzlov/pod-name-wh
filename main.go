@@ -59,7 +59,21 @@ func extractNodeName(pod *corev1.Pod) string {
 	return ""
 }
 
-func mutatePod(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func parseNodeName(config *appconfig.AppConfig, nodeName string) (string, error) {
+	matches := config.NodeRegex.FindStringSubmatch(nodeName)
+	if len(matches) == 0 {
+		return "", fmt.Errorf("match not found")
+	}
+	for i := 1; i < len(matches); i++ {
+		if matches[i] != "" {
+			return matches[i], nil
+		}
+	}
+	// we are not supposed to get here
+	return "", fmt.Errorf("no matches found")
+}
+
+func mutatePod(ctx context.Context, config *appconfig.AppConfig, w http.ResponseWriter, r *http.Request) {
 	logger := slogctx.FromCtx(ctx)
 
 	var admissionReview admissionv1.AdmissionReview
@@ -97,6 +111,12 @@ func mutatePod(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node not assigned", http.StatusBadRequest)
 		return
 	}
+	nodeName, err = parseNodeName(config, nodeName)
+	if err != nil {
+		logger.Error("node name does not match regex", "error", err.Error(), "regex", config.NodeRegex.String())
+		http.Error(w, "node name does not match regex", http.StatusBadRequest)
+		return
+	}
 
 	sanitizedNodeName := strings.ReplaceAll(nodeName, "_", "-")
 	newPodName := pod.GenerateName + sanitizedNodeName
@@ -108,8 +128,7 @@ func mutatePod(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Modify the pod name
-	patch := []map[string]interface{}{
+	patch := []map[string]any{
 		{
 			"op":    "replace",
 			"path":  "/metadata/name",
@@ -125,9 +144,9 @@ func mutatePod(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 
 	patchType := admissionv1.PatchTypeJSONPatch
 	admissionReview.Response = &admissionv1.AdmissionResponse{
-		UID:     admissionReview.Request.UID,
-		Allowed: true,
-		Patch:   patchBytes,
+		UID:       admissionReview.Request.UID,
+		Allowed:   true,
+		Patch:     patchBytes,
 		PatchType: &patchType,
 	}
 
@@ -155,7 +174,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mutate-pod", func(w http.ResponseWriter, r *http.Request) {
-		mutatePod(ctx, w, r)
+		mutatePod(ctx, appConfig, w, r)
 	})
 	server := &http.Server{
 		Addr:    appConfig.ListenAddress,
@@ -166,6 +185,7 @@ func main() {
 		err := server.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key")
 		if !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server error", "error", err.Error())
+			cancel()
 		}
 		logger.Info("Stopped serving new connections")
 	}()

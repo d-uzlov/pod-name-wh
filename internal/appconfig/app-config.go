@@ -3,6 +3,7 @@ package appconfig
 import (
 	"flag"
 	"log/slog"
+	"regexp"
 
 	"github.com/kouhin/envflag"
 )
@@ -11,6 +12,7 @@ type AppConfig struct {
 	LogLevel      slog.Level
 	ListenAddress string
 	Hostname      string
+	NodeRegex     *regexp.Regexp
 }
 
 func ParseConfig() *AppConfig {
@@ -20,6 +22,8 @@ func ParseConfig() *AppConfig {
 	flag.StringVar(&logLevel, "log-level", "info", "One of: error, warn, info, debug")
 	flag.StringVar(&result.ListenAddress, "listen-address", ":8443", "Address to listen on")
 	flag.StringVar(&result.Hostname, "hostname", "", "Hostname to use in logs, if it needs to be different from OS-provided value")
+	var NodeRegex string
+	flag.StringVar(&NodeRegex, "node-regex", "^(.*)$", "Limit the part of the node name that will be used in pod name")
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)
@@ -37,6 +41,8 @@ func ParseConfig() *AppConfig {
 	default:
 		panic("unknown log level: " + logLevel)
 	}
+
+	result.NodeRegex = regexp.MustCompile(NodeRegex)
 
 	return result
 }

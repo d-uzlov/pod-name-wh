@@ -37,7 +37,13 @@ spec:
           containerPort: 8443
         securityContext:
           readOnlyRootFilesystem: true
-        env: []
+        env:
+        - name: LISTEN_ADDRESS
+          value: :8443
+        - name: LOG_LEVEL
+          value: debug
+        - name: NODE_REGEX
+          value: ^(.*)$
         resources:
           requests:
             cpu: 1m

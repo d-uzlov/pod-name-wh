@@ -1,7 +1,10 @@
 
 # Pod name webhook
 
-Mutating webhook for k8s that modifies pod names
+Mutating webhook for k8s that modifies pod names to use node name as name suffix.
+
+The intended use for this is to allow for stable names for daemonsets.
+But it should work for any pods are bound to a certain node before scheduling.
 
 # Usage example
 
@@ -34,6 +37,16 @@ metadata:
 Note that this will only work for pods that either have `NodeName` specified,
 or have `NodeAffinity` matching a single node.
 
+You can customize which part of the node name will be used as pod suffix.
+Set `NODE_REGEX` env to appropriate value.
+The first matching capture group will be used as pod suffix.
+
+For example:
+
+- `^(.*)$` (default): use whole node name
+- `^(.*)\.domain$`: use domain prefix
+- `^(node\.fqdn)$|^(.*)\.domain$`: if node name matches `node.fqdn`, use it, else use domain prefix
+
 # Building
 
 ```bash
@@ -45,7 +58,7 @@ CGO_ENABLED=0 go build .
 # build image for deployment
 docker build .
 
-image_name=daemonset-name-wh:v0.1.1
+image_name=daemonset-name-wh:v0.1.5
 
 docker_username=
 docker build --push . -t docker.io/$docker_username/$image_name
