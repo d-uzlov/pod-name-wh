@@ -3,6 +3,7 @@
     "admissionv1",
     "appconfig",
     "corev1",
+    "daemonset",
     "metav1",
     "slogctx"
   ]
