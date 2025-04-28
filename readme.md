@@ -24,7 +24,22 @@ my-daemonset-dsz8x               node2.domain
 my-daemonset-hcnrq               node3.domain
 ```
 
-# Usage example
+The obvious consequence of using this webhook is that DaemonSet names are no longer random/unique.
+
+This is very convenient, because for DaemonSet node name is very important,
+and now human reader can infer it from pod name, without looking at extended properties of pod or metric.
+This avoids cluttering monitoring system with many pods, whenever a DaemonSet needs to be configured or restarted.
+
+This may be an issue in case you rely on pod names being unique.
+
+However, there are other cases where pod names are stable: static pods and StatefulSets.
+Also, some controllers sometimes use stable names. For example, CNPG's Cluster controller is similar to StatefulSet.
+Open Kruise allows you to hot-replace containers using different images and several other parameters.
+And even when using standard Deployment/DaemonSet containers in a pod can be recreated, after previous container finished with an error.
+So your monitoring/alerting system already needs to be able to deal with pods with stable names,
+so giving stable names to DaemonSet pods should not create any _new_ issues.
+
+# Installation
 
 This app needs a certificate setup for a webhook.
 This example uses `cert-manager` to avoid creating certificate manually.
